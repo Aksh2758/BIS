@@ -1,0 +1,20 @@
+# Core RAG
+sentence-transformers==5.2.2
+faiss-cpu==1.13.2
+numpy==1.26.4
+
+# PDF Parsing (for extract_dataset.py)
+pdfplumber==0.11.9
+pdfminer.six==20251230
+
+# ML / Transformer stack (pulled in by sentence-transformers)
+torch==2.10.0
+transformers==5.0.0
+tokenizers==0.22.2
+huggingface_hub==1.4.1
+safetensors==0.7.0
+tqdm==4.67.3
+Pillow==12.1.1
+scikit-learn==1.7.2
+scipy==1.15.3
+joblib==1.5.3
