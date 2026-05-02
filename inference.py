@@ -1,7 +1,7 @@
 """
 BIS Standards Recommendation Engine - Inference Entry Point
 Usage: python inference.py --input <input.json> --output <output.json>
-Set ANTHROPIC_API_KEY environment variable before running.
+Set GROQ_API_KEY in .env file before running. See .env.example
 """
 import json
 import argparse
@@ -9,9 +9,6 @@ from src.rag_pipeline import BISRagPipeline
 
 
 def load_documents():
-    """
-    Load enriched chunks (with metadata) if available, else fall back to plain chunks.
-    """
     try:
         with open("data/standards_chunks_enriched.json", "r", encoding="utf-8") as f:
             docs = json.load(f)
@@ -49,27 +46,29 @@ def main(input_path, output_path):
     results = []
 
     for item in queries:
-        query_id = item["id"]
-        query_text = item["query"]
+        retrieved, _, latency = rag.query(item["query"], top_k=5)
 
-        retrieved, rationale_map, latency = rag.query(query_text, top_k=5)
-
-        # Build rationale list aligned to retrieved standards
-        rationale = [rationale_map.get(s, "") for s in retrieved]
-
+        # Strict key order matching sample_output.json exactly
         result = {
-            "id": query_id,
+            "id": item["id"],
+            "query": item["query"],
             "retrieved_standards": retrieved,
-            "rationale": rationale,
             "latency_seconds": round(latency, 4)
         }
 
-        # Pass through expected_standards if present (for local eval)
+        # expected_standards: pass through if present in input (public test set has it)
+        # On hidden private dataset it won't be in input, so it won't appear in output
         if "expected_standards" in item:
-            result["expected_standards"] = item["expected_standards"]
+            result = {
+                "id": item["id"],
+                "query": item["query"],
+                "expected_standards": item["expected_standards"],
+                "retrieved_standards": retrieved,
+                "latency_seconds": round(latency, 4)
+            }
 
         results.append(result)
-        print(f"[{query_id}] Done in {latency:.2f}s — top: {retrieved[0] if retrieved else 'none'}")
+        print(f"[{item['id']}] Done in {latency:.2f}s — top: {retrieved[0] if retrieved else 'none'}")
 
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(results, f, indent=2)
