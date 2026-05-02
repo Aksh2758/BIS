@@ -116,6 +116,8 @@ html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; color: var(--te
     font-size: 10px; letter-spacing: 0.16em;
     color: var(--text-3); text-transform: uppercase;
     margin-bottom: 0.7rem;
+    margin-top: 2.5rem;
+    padding: 0 2rem;
     font-weight: 500;
 }
 
@@ -154,7 +156,7 @@ html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; color: var(--te
 }
 
 /* ── Results area ── */
-.results-zone { padding: 2rem 5rem; }
+.results-zone { padding: 1rem 4rem; }
 .results-header {
     display: flex; align-items: center; gap: 12px;
     margin-bottom: 1.5rem;
