@@ -1,44 +1,46 @@
 """
 BIS Standards Recommendation Engine - Inference Entry Point
-Usage: python inference.py --input <input.json> --output <output.json>
-Set GROQ_API_KEY in .env file before running. See .env.example
+
+Usage:
+    python inference.py --input <input.json> --output <output.json>
+
+LLM (Groq) is disabled during inference for speed and reliability.
+All scoring metrics (Hit Rate, MRR, Latency) are purely retrieval-based.
+Groq is only used in the Streamlit UI for rationale generation.
 """
 import json
-import argparse
-from src.rag_pipeline import BISRagPipeline
 import os
-os.environ.pop("GROQ_API_KEY", None)  # Forces retrieval-only mode
+import argparse
+from src.pipeline import BISRagPipeline
+
 
 def load_documents():
-    try:
-        with open("data/standards_chunks_enriched.json", "r", encoding="utf-8") as f:
-            docs = json.load(f)
-        print(f"Loaded {len(docs)} enriched standards from standards_chunks_enriched.json")
-        return docs
-    except FileNotFoundError:
-        pass
-
-    try:
-        with open("data/standards_chunks.json", "r", encoding="utf-8") as f:
-            docs = json.load(f)
-        print(f"Loaded {len(docs)} standards from standards_chunks.json (no metadata)")
-        return docs
-    except FileNotFoundError:
-        with open("data/bis_docs.txt", "r", encoding="utf-8") as f:
-            lines = [l.strip() for l in f if l.strip()]
-        docs = []
-        for line in lines:
-            if '|' in line:
-                label, text = line.split('|', 1)
-            else:
-                label, text = line, line
-            docs.append({'label': label.strip(), 'text': text.strip()})
-        print(f"Loaded {len(docs)} standards from bis_docs.txt (fallback)")
-        return docs
+    for path in ["data/standards_chunks_enriched.json", "data/standards_chunks.json"]:
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                docs = json.load(f)
+            print(f"Loaded {len(docs)} standards from {path}")
+            return docs
+    with open("data/bis_docs.txt", "r", encoding="utf-8") as f:
+        lines = [l.strip() for l in f if l.strip()]
+    docs = []
+    for line in lines:
+        if '|' in line:
+            label, text = line.split('|', 1)
+        else:
+            label, text = line, line
+        docs.append({'label': label.strip(), 'text': text.strip()})
+    print(f"Loaded {len(docs)} standards from bis_docs.txt (fallback)")
+    return docs
 
 
 def main(input_path, output_path):
     documents = load_documents()
+
+    # Disable LLM for inference — all steps are local
+    # Avoids Groq rate limits and ensures consistent <5s latency
+    os.environ.pop("GROQ_API_KEY", None)
+
     rag = BISRagPipeline(documents)
 
     with open(input_path, "r", encoding="utf-8") as f:
@@ -47,29 +49,37 @@ def main(input_path, output_path):
     results = []
 
     for item in queries:
-        retrieved, _, latency = rag.query(item["query"], top_k=5)
+        query_text = str(item.get("query", "")).strip()
 
-        # Strict key order matching sample_output.json exactly
-        result = {
-            "id": item["id"],
-            "query": item["query"],
-            "retrieved_standards": retrieved,
-            "latency_seconds": round(latency, 4)
-        }
+        try:
+            retrieved, _, latency = rag.query(query_text, top_k=5)
+        except Exception as e:
+            print(f"[{item.get('id','?')}] ERROR: {e} — returning empty result")
+            retrieved, latency = [], 0.0
 
-        # expected_standards: pass through if present in input (public test set has it)
-        # On hidden private dataset it won't be in input, so it won't appear in output
+        safe_retrieved = retrieved if retrieved else []
+
+        # Strict output schema matching required format exactly
+        # expected_standards always before retrieved_standards when present
         if "expected_standards" in item:
             result = {
-                "id": item["id"],
-                "query": item["query"],
+                "id": item.get("id", "unknown"),
+                "query": query_text,
                 "expected_standards": item["expected_standards"],
-                "retrieved_standards": retrieved,
+                "retrieved_standards": safe_retrieved,
+                "latency_seconds": round(latency, 4)
+            }
+        else:
+            result = {
+                "id": item.get("id", "unknown"),
+                "query": query_text,
+                "retrieved_standards": safe_retrieved,
                 "latency_seconds": round(latency, 4)
             }
 
         results.append(result)
-        print(f"[{item['id']}] Done in {latency:.2f}s — top: {retrieved[0] if retrieved else 'none'}")
+        top = safe_retrieved[0] if safe_retrieved else "none"
+        print(f"[{item.get('id','?')}] Done in {latency:.2f}s — top: {top}")
 
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(results, f, indent=2)
@@ -79,7 +89,7 @@ def main(input_path, output_path):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="BIS RAG Inference")
-    parser.add_argument("--input", required=True, help="Path to input JSON file")
-    parser.add_argument("--output", required=True, help="Path to output JSON file")
+    parser.add_argument("--input", required=True)
+    parser.add_argument("--output", required=True)
     args = parser.parse_args()
     main(args.input, args.output)

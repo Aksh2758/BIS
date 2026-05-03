@@ -1,1 +1,3 @@
-# BIS RAG Source Package
+from .pipeline import BISRagPipeline
+
+__all__ = ["BISRagPipeline"]

@@ -20,11 +20,11 @@ def load_documents():
     sys.exit(1)
 
 if __name__ == '__main__':
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
-    from rag_pipeline import BISRagPipeline, FAISS_INDEX_PATH, BM25_PATH, META_PATH
-    import os
+    sys.path.insert(0, os.path.dirname(__file__))
+    from src.retriever import FAISS_INDEX_PATH, BM25_PATH, META_PATH
+    from src.pipeline import BISRagPipeline
 
-    # Delete old index if it exists to force rebuild
+    # Delete old index to force rebuild
     for p in [FAISS_INDEX_PATH, BM25_PATH, META_PATH]:
         if os.path.exists(p):
             os.remove(p)
