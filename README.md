@@ -1,5 +1,5 @@
 # BIS Standards Recommendation Engine
-### BIS × Sigma Squad AI Hackathon | Track: AI / RAG
+### BIS × Sigma Squad AI Hackathon | Team: ByteCode | Track: AI / RAG
 
 An AI-powered RAG pipeline that helps Indian MSEs find relevant BIS standards from a plain-language product description — in under 2 seconds.
 
@@ -42,7 +42,7 @@ python inference.py --input hidden_private_dataset.json --output team_results.js
 python eval_script.py --results team_results.json
 ```
 
-> **No model download required on first run.** The precomputed FAISS and BM25 indexes are included in this repo (`data/faiss.index`, `data/bm25.pkl`, `data/meta.pkl`). Only the query gets encoded at runtime (~50ms).
+> **No model download or API key required for inference.** The precomputed FAISS and BM25 indexes are included in this repo (`data/faiss.index`, `data/bm25.pkl`, `data/meta.pkl`). Only the query gets encoded at runtime (~50ms). All inference steps are 100% local.
 
 ---
 
@@ -52,8 +52,8 @@ python eval_script.py --results team_results.json
 
 - Python 3.9 or higher
 - pip
-- ~500MB disk space (for sentence-transformer model cache)
-- Internet connection for first run only (to download `all-MiniLM-L6-v2` and `ms-marco-MiniLM-L-6-v2` from HuggingFace)
+- ~500MB disk space (for sentence-transformer model cache on first run)
+- Internet connection for first run only (to download `all-MiniLM-L6-v2` and `ms-marco-MiniLM-L-6-v2` from HuggingFace — cached after first use)
 
 ### Step 1 — Install Python dependencies
 
@@ -61,7 +61,7 @@ python eval_script.py --results team_results.json
 pip install -r requirements.txt
 ```
 
-All required packages are pinned in `requirements.txt`. No virtual environment is strictly required but recommended:
+All required packages are pinned in `requirements.txt`. Virtual environment recommended:
 
 ```bash
 python -m venv venv
@@ -72,30 +72,27 @@ pip install -r requirements.txt
 
 ### Step 2 — (Optional) Groq API key
 
-The system works **fully without a Groq API key**. Retrieval accuracy and all automated metrics are unaffected. The API key only enables LLM-generated rationale text in the Streamlit UI.
+The system works **fully without a Groq API key**. Retrieval accuracy and all automated metrics (Hit Rate, MRR, Latency) are completely unaffected. The API key only enables LLM-generated rationale text in the Streamlit UI (`app.py`).
 
-To enable it:
+**`inference.py` intentionally disables Groq** to avoid rate limits during batch processing. Zero API calls are made during judge evaluation.
+
+To enable Groq for the UI:
 ```bash
 cp .env.example .env
+# Edit .env and set: GROQ_API_KEY=your_key_here
 ```
-Edit `.env` and set:
-```
-GROQ_API_KEY=your_key_here
-```
-Get a free key at https://console.groq.com (free tier, no credit card required).
-
-**Note:** `inference.py` intentionally disables the Groq API to avoid rate limits during batch processing. Groq is only used in `app.py` (Streamlit UI).
+Get a free key at https://console.groq.com (no credit card required).
 
 ### Step 3 — Verify precomputed index
 
-The following files should already be present in `data/`:
+The following files are included in the repo under `data/`:
 ```
 data/faiss.index    ← precomputed FAISS dense index (564 standards)
 data/bm25.pkl       ← precomputed BM25 sparse index
 data/meta.pkl       ← saved labels, texts, and metadata
 ```
 
-If any of these are missing, rebuild them with:
+If any of these are missing, rebuild them:
 ```bash
 python build_index.py
 ```
@@ -110,23 +107,23 @@ python inference.py --input hidden_private_dataset.json --output team_results.js
 ```
 
 **What this does:**
-1. Loads precomputed index from disk (instant — no encoding)
-2. For each query: runs hybrid retrieval → cross-encoder reranking → returns top-5 standards
-3. Writes results to `team_results.json` in the required schema
+1. Loads precomputed index from disk (instant — no re-encoding)
+2. For each query: hybrid retrieval → cross-encoder reranking → top-5 standards
+3. Writes results to the output path in the required JSON schema
 
-**Expected output format:**
+**Output format (strict schema):**
 ```json
 [
   {
-    "id": "Q-01",
-    "query": "...",
-    "retrieved_standards": ["IS 269 : 1989", "IS 8112 : 1989", ...],
-    "latency_seconds": 1.52
+    "id": "PUB-01",
+    "query": "We are a small enterprise manufacturing 33 Grade Ordinary Portland Cement...",
+    "retrieved_standards": ["IS 269 : 1989", "IS 8112 : 1989", "IS 12269 : 1987", "IS 8043 : 1991", "IS 8042 : 1989"],
+    "latency_seconds": 1.5231
   }
 ]
 ```
 
-**No API key needed.** All steps in `inference.py` are local (no Groq calls).
+**No API key needed.** All steps in `inference.py` are 100% local (no Groq calls). Invalid/missing queries are handled gracefully — a single bad query will never crash the full batch.
 
 ---
 
@@ -146,7 +143,7 @@ Uses the organizer-provided `eval_script.py`. Outputs Hit Rate @3, MRR @5, and A
 streamlit run app.py
 ```
 
-Opens at `http://localhost:8501`. The UI uses Groq (if key is set) to generate human-readable rationale for each retrieved standard. Without the key it falls back to chunk-derived text from BIS SP 21.
+Opens at `http://localhost:8501`. Groq is used (if key is set) for LLM rationale. Without the key, rationale is derived from BIS SP 21 chunk text — no degradation in retrieval quality.
 
 ---
 
@@ -155,21 +152,21 @@ Opens at `http://localhost:8501`. The UI uses Groq (if key is set) to generate h
 ```
 BIS/
 ├── src/
-│   └── rag_pipeline.py          # Core RAG pipeline (retrieval + reranking + rationale)
+│   ├── __init__.py              # Exports BISRagPipeline
+│   ├── pipeline.py              # Orchestrator — wires all modules together
+│   ├── retriever.py             # Hybrid FAISS + BM25 + RRF + metadata boost
+│   ├── reranker.py              # Cross-encoder re-ranking (ms-marco-MiniLM-L-6-v2)
+│   └── generator.py             # Query expansion + rationale generation (Groq/fallback)
 ├── data/
 │   ├── standards_chunks_enriched.json   # 564 enriched BIS standards (source of truth)
 │   ├── standards_chunks.json            # Raw parsed standards (fallback)
 │   ├── bis_docs.txt                     # Plain text fallback
 │   ├── dataset.pdf                      # Source: BIS SP 21 (Building Materials)
 │   ├── public_test_results.json         # Results on public test set
-│   ├── faiss.index                      # ← Precomputed dense index (commit this)
-│   ├── bm25.pkl                         # ← Precomputed sparse index (commit this)
-│   └── meta.pkl                         # ← Saved labels + texts (commit this)
-├── tests/
-│   └── test_pipeline.py         # Unit tests
-├── assets/
-│   └── architecture.png         # Architecture diagram
-├── inference.py                 # Judge entry point (no LLM, fully local)
+│   ├── faiss.index                      # Precomputed FAISS dense index ← commit this
+│   ├── bm25.pkl                         # Precomputed BM25 sparse index ← commit this
+│   └── meta.pkl                         # Saved labels + texts + metadata ← commit this
+├── inference.py                 # Judge entry point — fully local, no LLM
 ├── build_index.py               # Rebuild indexes if missing
 ├── enrich_chunks.py             # One-time metadata enrichment script
 ├── extract_dataset.py           # One-time PDF parsing script
@@ -184,31 +181,40 @@ BIS/
 
 ## System Architecture
 
-![RAG Architecture](assets/architecture.png)
-
 ### Pipeline (per query)
 
-```mermaid
-graph TD
-    A[User Query] --> B[LLM Query Expansion]
-    B --> C1[Dense Retrieval: FAISS + all-MiniLM-L6-v2]
-    B --> C2[Sparse Retrieval: BM25]
-    C1 --> D[Reciprocal Rank Fusion - RRF]
-    C2 --> D
-    D --> E[Metadata Boosting]
-    E --> F[Cross-Encoder Re-ranking: ms-marco-MiniLM-L-6-v2]
-    F --> G[Rationale Generation: Llama-3.1-8b]
-    G --> H[Final Results]
+```
+User Query
+    │
+    ▼
+[1] Query Expansion          ← Groq/Llama-3.1-8b (3s hard timeout, skipped if unavailable)
+    │
+    ├──► [2a] Dense Retrieval   ← FAISS IndexFlatIP + all-MiniLM-L6-v2 embeddings
+    │
+    └──► [2b] Sparse Retrieval  ← BM25Okapi + synonym expansion (OPC, PPC, AAC...)
+    │
+    ▼
+[3] RRF Fusion (k=60) + Metadata Boost  ← local
+    │
+    ▼
+[4] Cross-Encoder Re-ranking            ← ms-marco-MiniLM-L-6-v2, top-10, local CPU
+    │
+    ▼
+[5] Rationale Generation    ← single batched Groq call OR chunk-text fallback
+    │
+    ▼
+    Top-5 BIS Standards
 ```
 
 ### LLM Usage Summary
 
-| Component | inference.py | app.py (UI) |
-|-----------|-------------|-------------|
-| Query Expansion | Disabled | Enabled (3s timeout) |
-| Rationale | Disabled | Enabled (single batched call) |
-| Retrieval | 100% local | 100% local |
-| Re-ranking | 100% local | 100% local |
+| Component | `inference.py` | `app.py` (UI) |
+|-----------|---------------|---------------|
+| Query Expansion | ❌ Disabled | ✅ Enabled (3s timeout) |
+| Rationale | ❌ Disabled | ✅ Single batched call |
+| Retrieval | ✅ 100% local | ✅ 100% local |
+| Re-ranking | ✅ 100% local | ✅ 100% local |
+| API calls/query | **0** | Max 2 |
 
 ### Synonym Expansion
 
@@ -223,12 +229,14 @@ Before BM25 retrieval, abbreviations are expanded to full BIS terminology:
 | HAC | High Alumina Cement |
 | AAC | Autoclaved Aerated Concrete |
 | 33 GRADE | 33 Grade Ordinary Portland Cement |
+| 43 GRADE | 43 Grade Ordinary Portland Cement |
+| 53 GRADE | 53 Grade Ordinary Portland Cement |
 
 ### Metadata Boosting
 
 Standards are enriched with boolean flags during preprocessing (`enrich_chunks.py`). During retrieval, query signals are matched against these flags to apply a +0.15 score boost per match (capped at +0.30):
 
-| Flag | Triggered by query terms |
+| Flag | Triggered by |
 |---|---|
 | is_lightweight | lightweight, aerated, cellular, autoclaved |
 | is_slag_cement | slag, Portland slag, PSC |
@@ -260,7 +268,7 @@ Standards are enriched with boolean flags during preprocessing (`enrich_chunks.p
 }
 ```
 
-**Why one chunk per standard?** BIS SP 21 provides compact summaries (100–300 words each) — these are already at the right semantic granularity. Splitting further would lose the standard number–content association. Merging would dilute relevance scores.
+**Why one chunk per standard?** BIS SP 21 provides compact summaries (100–300 words each) — already at the right semantic granularity. Splitting further would lose the IS number ↔ content association. Merging would dilute relevance scores.
 
 **Total chunks:** 564 BIS standards from the Building Materials category.
 
@@ -271,16 +279,16 @@ Standards are enriched with boolean flags during preprocessing (`enrich_chunks.p
 ### To update or replace the source PDF
 
 1. Replace `data/dataset.pdf` with your new PDF
-2. Run the parser:
+2. Parse it:
    ```bash
    python extract_dataset.py
    ```
-   This generates `data/standards_chunks.json`
-3. Run enrichment to add metadata flags:
+   Generates `data/standards_chunks.json`
+3. Enrich with metadata flags:
    ```bash
    python enrich_chunks.py
    ```
-   This generates `data/standards_chunks_enriched.json`
+   Generates `data/standards_chunks_enriched.json`
 4. Rebuild the index:
    ```bash
    python build_index.py
@@ -288,7 +296,7 @@ Standards are enriched with boolean flags during preprocessing (`enrich_chunks.p
 
 ### To add custom standards manually
 
-Edit `data/standards_chunks_enriched.json` directly. Each entry must follow:
+Edit `data/standards_chunks_enriched.json` directly:
 ```json
 {
   "label": "IS XXXX : YYYY",
@@ -296,15 +304,15 @@ Edit `data/standards_chunks_enriched.json` directly. Each entry must follow:
   "metadata": {}
 }
 ```
-Then rebuild the index with `python build_index.py`.
+Then run `python build_index.py`.
 
 ### To change the number of returned standards
 
-Edit `inference.py` line:
+In `inference.py`, change:
 ```python
-retrieved, _, latency = rag.query(item["query"], top_k=5)
+retrieved, _, latency = pipeline.query(query_text, top_k=5)
 ```
-Change `top_k=5` to any number between 1 and 20.
+to any value between 1 and 20.
 
 ---
 
@@ -312,9 +320,9 @@ Change `top_k=5` to any number between 1 and 20.
 
 | Variable | Required | Description |
 |---|---|---|
-| `GROQ_API_KEY` | Optional | Groq API key for LLM rationale in UI. Get free at console.groq.com |
+| `GROQ_API_KEY` | Optional | For LLM rationale in UI only. Get free at console.groq.com |
 
-Copy `.env.example` to `.env` and fill in values. The system runs without any env vars set.
+Copy `.env.example` to `.env`. The system runs fully without any env vars set.
 
 ---
 
@@ -330,14 +338,21 @@ pip install rank_bm25
 python build_index.py
 ```
 
-**Slow first query (~20s)**
-The sentence-transformer models download from HuggingFace on first use (~80MB). This only happens once — subsequent runs use the local cache. Ensure internet access on first run.
+**Slow first query (~20s on cold start)**
+sentence-transformer models download from HuggingFace on first use (~80MB total). This happens once — subsequent runs use the local HuggingFace cache. Internet required on first run only.
 
 **`GROQ_API_KEY not set` warning in logs**
-This is expected and safe. The system runs in retrieval-only mode. Retrieval accuracy is identical.
+Expected and safe. System runs in retrieval-only mode. All automated metrics are unaffected.
 
 **`429 Too Many Requests` from Groq**
-Only appears in `app.py` (UI). Does not affect `inference.py`. If it appears in the UI, queries are still processed correctly after the retry delay.
+Only appears in `app.py` (UI) during heavy use. Does not affect `inference.py` — Groq is fully disabled there.
+
+**`ModuleNotFoundError: No module named 'src.pipeline'`**
+Make sure you are running from the repo root directory:
+```bash
+cd BIS
+python inference.py --input ...
+```
 
 ---
 
