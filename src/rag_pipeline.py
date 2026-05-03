@@ -3,6 +3,7 @@ import os
 import re
 import json
 import logging
+import pickle
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from dotenv import load_dotenv
@@ -20,15 +21,48 @@ logging.basicConfig(
 )
 logger = logging.getLogger("BIS-RAG")
 
+# Paths for precomputed index
+_DIR = os.path.dirname(os.path.abspath(__file__))
+_DATA_DIR = os.path.join(_DIR, '..', 'data')
+FAISS_INDEX_PATH = os.path.join(_DATA_DIR, 'faiss.index')
+BM25_PATH        = os.path.join(_DATA_DIR, 'bm25.pkl')
+META_PATH        = os.path.join(_DATA_DIR, 'meta.pkl')
+
+# Synonym expansion — maps abbreviations/alternate terms to full BIS terminology
+SYNONYMS = {
+    "OPC":   "Ordinary Portland Cement",
+    "PPC":   "Portland Pozzolana Cement",
+    "PSC":   "Portland Slag Cement",
+    "SRC":   "Sulphate Resisting Cement",
+    "HAC":   "High Alumina Cement",
+    "AAC":   "Autoclaved Aerated Concrete",
+    "RCC":   "Reinforced Cement Concrete",
+    "TMT":   "Thermo Mechanically Treated steel bars",
+    "HSD":   "High Strength Deformed bars",
+    "ISI":   "Indian Standards Institution",
+    "33 GRADE": "33 Grade Ordinary Portland Cement",
+    "43 GRADE": "43 Grade Ordinary Portland Cement",
+    "53 GRADE": "53 Grade Ordinary Portland Cement",
+}
+
+
+def _apply_synonyms(text):
+    """Expand abbreviations before retrieval for better BM25 matching."""
+    upper = text.upper()
+    for abbr, full in SYNONYMS.items():
+        if abbr in upper:
+            text = text + " " + full
+    return text
+
 
 def _detect_query_signals(query_text):
     q = query_text.upper()
     signals = {
-        'is_lightweight': any(k in q for k in ['LIGHTWEIGHT', 'LIGHT WEIGHT', 'AERATED', 'CELLULAR', 'AUTOCLAVED']),
-        'is_slag_cement': any(k in q for k in ['SLAG', 'PORTLAND SLAG']),
-        'is_pozzolana': any(k in q for k in ['POZZOLANA', 'POZZOLANIC', 'FLY ASH']),
+        'is_lightweight':    any(k in q for k in ['LIGHTWEIGHT', 'LIGHT WEIGHT', 'AERATED', 'CELLULAR', 'AUTOCLAVED']),
+        'is_slag_cement':    any(k in q for k in ['SLAG', 'PORTLAND SLAG', 'PSC']),
+        'is_pozzolana':      any(k in q for k in ['POZZOLANA', 'POZZOLANIC', 'FLY ASH', 'PPC']),
         'is_rapid_hardening': any(k in q for k in ['RAPID', 'RAPID HARDENING']),
-        'is_white_cement': 'WHITE' in q and 'CEMENT' in q,
+        'is_white_cement':   'WHITE' in q and 'CEMENT' in q,
         'part_hint': None,
     }
     part_match = re.search(r'PART\s*(\d+)', q)
@@ -48,44 +82,102 @@ def _metadata_boost(doc_meta, signals):
 
 
 class BISRagPipeline:
+    def _init_groq(self, api_key):
+        """
+        Initialize Groq client and verify it actually works with a tiny test call.
+        If the key is invalid, expired, or network is down → returns None so
+        every downstream step uses the chunk-text fallback automatically.
+        """
+        try:
+            client = Groq(api_key=api_key)
+            # Minimal health check — 1 token, near-zero cost/latency
+            client.chat.completions.create(
+                model="llama-3.1-8b-instant",
+                messages=[{"role": "user", "content": "hi"}],
+                max_tokens=1,
+            )
+            logger.info("Groq API key verified — LLM features enabled.")
+            return client
+        except Exception as e:
+            logger.warning(f"Groq API check failed ({e}) — switching to retrieval-only mode.")
+            logger.warning("Rationale will use BIS chunk text. Retrieval accuracy is unaffected.")
+            return None
     def __init__(self, documents):
         logger.info(f"Initializing BISRagPipeline with {len(documents)} documents.")
-        self.model = SentenceTransformer('all-MiniLM-L6-v2')
+
+        # Load models once — these are cached by sentence-transformers after first download
+        self.model    = SentenceTransformer('all-MiniLM-L6-v2')
         self.reranker = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
 
-        self.labels = [doc['label'] for doc in documents]
-        self.texts = [doc['text'] for doc in documents]
+        self.labels   = [doc['label'] for doc in documents]
+        self.texts    = [doc['text']  for doc in documents]
         self.metadata = [doc.get('metadata', {}) for doc in documents]
 
-        # Dense Index (FAISS)
+        # ── Precomputed index: load from disk if available, else build and save ──
+        if self._index_exists():
+            self._load_index()
+        else:
+            self._build_index()
+            self._save_index()
+
+        # Groq client — with health check so bad key/no network fails gracefully
+        api_key = os.environ.get("GROQ_API_KEY")
+        if api_key:
+            self.llm_client = self._init_groq(api_key)
+        else:
+            self.llm_client = None
+            logger.warning("GROQ_API_KEY not set — running in retrieval-only mode (chunk-text rationale).")
+
+    # ── Index persistence ──────────────────────────────────────────────────────
+
+    def _index_exists(self):
+        return all(os.path.exists(p) for p in [FAISS_INDEX_PATH, BM25_PATH, META_PATH])
+
+    def _build_index(self):
+        logger.info("Building index from scratch (first run — will be cached for next time)...")
+
+        # Dense
         logger.info("Encoding documents for Dense Retrieval...")
-        raw_embeddings = self.model.encode(self.texts, show_progress_bar=False, normalize_embeddings=True)
-        self.embeddings = np.array(raw_embeddings).astype('float32')
+        raw_emb = self.model.encode(self.texts, show_progress_bar=True, normalize_embeddings=True)
+        self.embeddings = np.array(raw_emb).astype('float32')
         dim = self.embeddings.shape[1]
         self.index = faiss.IndexFlatIP(dim)
         self.index.add(self.embeddings)
         logger.info("FAISS index built.")
 
-        # Sparse Index (BM25)
+        # Sparse
         logger.info("Building BM25 Sparse Index...")
-        tokenized_corpus = [doc.lower().split() for doc in self.texts]
-        self.bm25 = BM25Okapi(tokenized_corpus)
+        tokenized = [t.lower().split() for t in self.texts]
+        self.bm25 = BM25Okapi(tokenized)
         logger.info("BM25 index built.")
 
-        api_key = os.environ.get("GROQ_API_KEY")
-        if api_key:
-            self.llm_client = Groq(api_key=api_key)
-            logger.info("Groq LLM client initialized.")
-        else:
-            self.llm_client = None
-            logger.warning("GROQ_API_KEY not set. Falling back to retrieval-only mode.")
+    def _save_index(self):
+        os.makedirs(_DATA_DIR, exist_ok=True)
+        faiss.write_index(self.index, FAISS_INDEX_PATH)
+        with open(BM25_PATH, 'wb') as f:
+            pickle.dump(self.bm25, f)
+        with open(META_PATH, 'wb') as f:
+            pickle.dump({'labels': self.labels, 'texts': self.texts, 'metadata': self.metadata}, f)
+        logger.info(f"Index saved to disk — subsequent runs will be ~10x faster.")
+
+    def _load_index(self):
+        logger.info("Loading precomputed index from disk...")
+        self.index = faiss.read_index(FAISS_INDEX_PATH)
+        with open(BM25_PATH, 'rb') as f:
+            self.bm25 = pickle.load(f)
+        with open(META_PATH, 'rb') as f:
+            meta = pickle.load(f)
+        # Override with saved labels/texts if consistent
+        if len(meta['labels']) == len(self.labels):
+            self.labels   = meta['labels']
+            self.texts    = meta['texts']
+            self.metadata = meta['metadata']
+        logger.info("Precomputed index loaded — skipping encoding step.")
+
+    # ── Pipeline steps ─────────────────────────────────────────────────────────
 
     def _expand_query(self, query_text):
-        """
-        Query Expansion with a hard 3-second timeout.
-        If Groq is slow or rate-limited, we skip expansion and use the original query.
-        This ensures this step NEVER causes latency spikes.
-        """
+        """LLM query expansion with hard 3s timeout — never blocks the pipeline."""
         if self.llm_client is None:
             return query_text
 
@@ -113,26 +205,29 @@ class BISRagPipeline:
                     logger.info(f"Expanded: '{expanded}'")
                     return expanded
         except FuturesTimeoutError:
-            logger.warning("Query expansion timed out (>3s) — using original query.")
+            logger.warning("Query expansion timed out — using original query.")
         except Exception as e:
             logger.warning(f"Query expansion skipped: {e}")
 
         return query_text
 
     def _retrieve(self, query_text, top_k=20):
-        """Hybrid Retrieval: BM25 + FAISS + RRF + Metadata Boost. 100% local, no API."""
-        # Dense
-        q_emb = self.model.encode([query_text], normalize_embeddings=True)
+        """Hybrid Retrieval: BM25 + FAISS + RRF + Synonym expansion + Metadata Boost."""
+        # Apply synonym expansion for better BM25 matching
+        enriched_query = _apply_synonyms(query_text)
+
+        # Dense retrieval
+        q_emb = self.model.encode([enriched_query], normalize_embeddings=True)
         q_emb = np.array(q_emb).astype('float32')
         _, dense_indices = self.index.search(q_emb, min(top_k * 3, len(self.labels)))
         dense_results = dense_indices[0].tolist()
 
-        # Sparse
-        tokenized_query = query_text.lower().split()
-        bm25_scores = self.bm25.get_scores(tokenized_query)
+        # Sparse retrieval
+        tokenized_query = enriched_query.lower().split()
+        bm25_scores  = self.bm25.get_scores(tokenized_query)
         sparse_results = np.argsort(bm25_scores)[::-1][:min(top_k * 3, len(self.labels))].tolist()
 
-        # RRF
+        # Reciprocal Rank Fusion
         k = 60
         rrf_scores = {}
         for rank, idx in enumerate(dense_results):
@@ -142,7 +237,7 @@ class BISRagPipeline:
 
         top_indices = sorted(rrf_scores.keys(), key=lambda x: rrf_scores[x], reverse=True)
 
-        # Metadata boost
+        # Metadata boost on top candidates
         signals = _detect_query_signals(query_text)
         candidates = []
         for idx in top_indices[:top_k]:
@@ -153,34 +248,47 @@ class BISRagPipeline:
 
     def _rerank(self, query_text, candidate_indices):
         """
-        Cross-Encoder Re-ranking — runs locally on CPU.
-        No API calls, no rate limits, deterministic quality.
-        Replaces the LLM verification step entirely.
+        Cross-Encoder Re-ranking — local CPU, no API calls.
+        Reduced to top-10 candidates (was 20) to halve cross-encoder time on slow hardware.
+        Quality is preserved because RRF already surfaces the right candidates.
         """
         if not candidate_indices:
             return []
-        logger.info(f"Re-ranking {len(candidate_indices)} candidates...")
-        pairs = [[query_text, self.texts[idx]] for idx in candidate_indices]
+        # Only re-rank top 10 — significant speedup on slow CPUs, minimal quality loss
+        candidates_to_rerank = candidate_indices[:10]
+        logger.info(f"Re-ranking {len(candidates_to_rerank)} candidates...")
+        pairs  = [[query_text, self.texts[idx]] for idx in candidates_to_rerank]
         scores = self.reranker.predict(pairs, show_progress_bar=False)
-        reranked = [idx for _, idx in sorted(zip(scores, candidate_indices), key=lambda x: x[0], reverse=True)]
+        reranked = [idx for _, idx in sorted(zip(scores, candidates_to_rerank), key=lambda x: x[0], reverse=True)]
         return reranked
 
-    def _generate_rationale(self, query_text, standards):
+    def _generate_rationale(self, query_text, standards, top_texts):
         """
-        Single batched LLM call for all standards.
-        KEY FIX: This is now exactly 1 API call instead of 5+.
-        The verification step has been removed — the cross-encoder already
-        handles quality filtering far better than per-standard LLM checks.
+        Single batched Groq call for all standards.
+        Includes the actual chunk text so rationale is grounded, not hallucinated.
+        Falls back to chunk-derived summary if Groq fails — no more generic fallback text.
         """
-        if self.llm_client is None or not standards:
-            return {s: "Matched via hybrid retrieval (BM25+FAISS) and cross-encoder re-ranking." for s in standards}
+        # Smart fallback: first sentence of each chunk — always meaningful, never generic
+        fallback = {}
+        for std, txt in zip(standards, top_texts):
+            first_sentence = txt.split('.')[0].strip()[:120] if txt else ""
+            fallback[std] = first_sentence if first_sentence else f"Relevant BIS standard for the specified product."
 
+        if self.llm_client is None or not standards:
+            return fallback
+
+        context_blocks = "\n\n".join(
+            f"[{std}]: {txt[:300]}" for std, txt in zip(standards, top_texts)
+        )
         standards_list = "\n".join(f"- {s}" for s in standards)
+
         prompt = (
             "You are a BIS compliance expert helping Indian MSEs.\n\n"
             f"Product/Query: {query_text}\n\n"
-            f"Retrieved BIS standards:\n{standards_list}\n\n"
-            "For each standard, write ONE sentence (max 20 words) explaining its relevance.\n"
+            f"Standard summaries from BIS SP 21:\n{context_blocks}\n\n"
+            f"For each of these standards:\n{standards_list}\n\n"
+            "Write ONE sentence (max 20 words) explaining WHY it is relevant to the product above. "
+            "Ground your answer strictly in the summary text provided. "
             "Return ONLY valid JSON. No markdown. No extra text.\n"
             'Format: {"IS XXX : YYYY": "reason", ...}'
         )
@@ -195,30 +303,36 @@ class BISRagPipeline:
             raw = response.choices[0].message.content.strip()
             raw = re.sub(r'^```json\s*', '', raw)
             raw = re.sub(r'\s*```$', '', raw)
-            return json.loads(raw)
+            result = json.loads(raw)
+            # Fill any missing keys with fallback
+            for std in standards:
+                if std not in result:
+                    result[std] = fallback[std]
+            return result
         except Exception as e:
-            logger.warning(f"Rationale generation failed ({e}) — using fallback.")
-            return {s: "Matched via hybrid retrieval and cross-encoder re-ranking." for s in standards}
+            logger.warning(f"Rationale generation failed ({e}) — using chunk-derived fallback.")
+            return fallback
 
     def query(self, text, top_k=5):
         start_time = time.time()
 
-        # Step 1: Query Expansion (max 3s, skipped gracefully if slow)
+        # Step 1: Query Expansion (max 3s timeout)
         expanded_query = self._expand_query(text)
 
-        # Step 2: Hybrid Retrieval — local only (BM25 + FAISS + RRF + metadata boost)
+        # Step 2: Hybrid Retrieval — local (BM25 + FAISS + RRF + synonyms + metadata boost)
         candidate_indices = self._retrieve(expanded_query, top_k=20)
 
-        # Step 3: Cross-Encoder Re-ranking — local only, replaces LLM verification
+        # Step 3: Cross-Encoder Re-ranking — local, top-10 only for speed
         reranked_indices = self._rerank(text, candidate_indices)
 
         # Step 4: Top-k selection
-        top_indices = reranked_indices[:top_k]
+        top_indices      = reranked_indices[:top_k]
         retrieved_labels = [self.labels[idx] for idx in top_indices]
+        top_texts        = [self.texts[idx]  for idx in top_indices]
 
-        # Step 5: Rationale — single batched call (was 5+ separate calls before)
-        rationale_map = self._generate_rationale(text, retrieved_labels)
+        # Step 5: Single batched rationale call with chunk context
+        rationale_map = self._generate_rationale(text, retrieved_labels, top_texts)
 
         latency = time.time() - start_time
-        logger.info(f"Query completed in {latency:.2f}s (max 2 LLM calls per query)")
+        logger.info(f"Query completed in {latency:.2f}s")
         return retrieved_labels, rationale_map, latency

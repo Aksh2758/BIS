@@ -6,7 +6,8 @@ Set GROQ_API_KEY in .env file before running. See .env.example
 import json
 import argparse
 from src.rag_pipeline import BISRagPipeline
-
+import os
+os.environ.pop("GROQ_API_KEY", None)  # Forces retrieval-only mode
 
 def load_documents():
     try:

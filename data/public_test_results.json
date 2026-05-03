@@ -12,7 +12,7 @@
       "IS 8043 : 1991",
       "IS 8042 : 1989"
     ],
-    "latency_seconds": 1.7147
+    "latency_seconds": 1.7831
   },
   {
     "id": "PUB-02",
@@ -27,7 +27,7 @@
       "IS 1195 : 2002",
       "IS 9142 : 1979"
     ],
-    "latency_seconds": 1.5153
+    "latency_seconds": 1.5194
   },
   {
     "id": "PUB-03",
@@ -37,12 +37,12 @@
     ],
     "retrieved_standards": [
       "IS 458 : 2003",
-      "IS 5820 : 1970",
       "IS 5751 : 1984",
-      "IS 6523 : 1983",
-      "IS 8329 : 2000"
+      "IS 8329 : 2000",
+      "IS 9893 : 1981",
+      "IS 2104 : 1981"
     ],
-    "latency_seconds": 1.4946
+    "latency_seconds": 1.5168
   },
   {
     "id": "PUB-04",
@@ -57,7 +57,7 @@
       "IS 3115 : 1992",
       "IS 2185 (PART 3) : 1984"
     ],
-    "latency_seconds": 1.4979
+    "latency_seconds": 1.4445
   },
   {
     "id": "PUB-05",
@@ -72,7 +72,7 @@
       "IS 14862 : 2000",
       "IS 2096 : 1992"
     ],
-    "latency_seconds": 1.4835
+    "latency_seconds": 1.4242
   },
   {
     "id": "PUB-06",
@@ -87,7 +87,7 @@
       "IS 1489 (PART1) : 1991",
       "IS 12330 : 1988"
     ],
-    "latency_seconds": 1.4619
+    "latency_seconds": 1.4971
   },
   {
     "id": "PUB-07",
@@ -98,11 +98,11 @@
     "retrieved_standards": [
       "IS 1489 (PART 2) :1991",
       "IS 1489 (PART1) : 1991",
-      "IS 8112 : 1989",
       "IS 12330 : 1988",
-      "IS 12269 : 1987"
+      "IS 12269 : 1987",
+      "IS 269 : 1989"
     ],
-    "latency_seconds": 1.5159
+    "latency_seconds": 1.4405
   },
   {
     "id": "PUB-08",
@@ -117,7 +117,7 @@
       "IS 9142 : 1979",
       "IS 2116 : 1980"
     ],
-    "latency_seconds": 1.5365
+    "latency_seconds": 1.4811
   },
   {
     "id": "PUB-09",
@@ -129,10 +129,10 @@
       "IS 6909 : 1990",
       "IS 12330 : 1988",
       "IS 269 : 1989",
-      "IS 455 : 1989",
-      "IS 8043 : 1991"
+      "IS 8043 : 1991",
+      "IS 8112 : 1989"
     ],
-    "latency_seconds": 1.5013
+    "latency_seconds": 1.4217
   },
   {
     "id": "PUB-10",
@@ -145,8 +145,8 @@
       "IS 8112 : 1989",
       "IS 8043 : 1991",
       "IS 12269 : 1987",
-      "IS 1489 (PART 2) :1991"
+      "IS 269 : 1989"
     ],
-    "latency_seconds": 1.5225
+    "latency_seconds": 1.3988
   }
 ]
