@@ -439,10 +439,22 @@ if should_search and query.strip():
         # Pipeline returns 3 values: labels, rationale_map, latency
         retrieved, rationale_map, latency = pipeline.query(query.strip(), top_k=5)
 
-        # Generate confidence scores from rank position (cross-encoder rank → % score)
-        # Rank 1 = highest, descending. Gives visual feedback without extra API call.
-        rank_scores = [82, 70, 60, 50, 42]
-        confidence_map = {label: rank_scores[i] for i, label in enumerate(retrieved)}
+        # Extract confidence metadata injected by pipeline.__meta__
+        meta_info      = rationale_map.pop("__meta__", {})
+        low_confidence = meta_info.get("low_confidence", False)
+        top_score_raw  = meta_info.get("top_score", None)
+
+        # Map raw cross-encoder score to 0-100% for display
+        import math
+        def _score_to_pct(raw):
+            if raw is None: return 50
+            clamped = max(-8.0, min(8.0, float(raw)))
+            return int(round(50 + clamped * 6.25))
+
+        top_pct = _score_to_pct(top_score_raw)
+        fallback_pcts = [top_pct, max(top_pct-8,10), max(top_pct-16,10),
+                         max(top_pct-22,10), max(top_pct-28,10)]
+        confidence_map = {label: fallback_pcts[i] for i, label in enumerate(retrieved)}
 
     st.session_state.trigger_search = False
     st.session_state.query_history.append({
@@ -467,6 +479,15 @@ if should_search and query.strip():
 
     # Top confidence for display in metrics
     top_conf = confidence_map.get(retrieved[0], 0) if retrieved else 0
+
+    # Low-confidence warning banner
+    if low_confidence and retrieved:
+        st.warning(
+            "⚠️ **Low match confidence** — no strong standard found for this query. "
+            "The results below are the closest matches but may not be directly applicable. "
+            "Try rephrasing with more specific material or product terms.",
+            icon=None,
+        )
 
     st.markdown(f"""
     <div class="metrics-grid">
@@ -499,6 +520,29 @@ if should_search and query.strip():
 
     bar_classes = ["bar-1", "bar-2", "bar-3", "bar-4", "bar-5"]
     rank_labels = ["#1", "#2", "#3", "#4", "#5"]
+
+    # ── Standard Clustering ─────────────────────────────────────────
+    # Group retrieved standards by category so user can see at a glance
+    # how many cement vs steel vs aggregate standards were found
+    from collections import defaultdict
+    cluster_map = defaultdict(list)
+    for lbl in retrieved:
+        _, cat_txt = get_category(meta_lookup.get(lbl, {}))
+        cluster_map[cat_txt].append(lbl)
+
+    if len(cluster_map) > 1:
+        cluster_pills = " ".join(
+            f'<span style="background:rgba(79,126,255,0.12);border:1px solid rgba(79,126,255,0.3);'
+            f'color:#7BA3FF;font-size:11px;padding:3px 10px;border-radius:99px;">'
+            f'{cat}: {len(stds)}</span>'
+            for cat, stds in sorted(cluster_map.items())
+        )
+        st.markdown(
+            f'<div style="margin-bottom:1rem;display:flex;gap:8px;flex-wrap:wrap;">'
+            f'<span style="font-size:11px;color:#5C6D8A;align-self:center;">Categories:</span>'
+            f'{cluster_pills}</div>',
+            unsafe_allow_html=True
+        )
 
     for i, label in enumerate(retrieved):
         meta       = meta_lookup.get(label, {})

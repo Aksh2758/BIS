@@ -74,17 +74,32 @@ class BISRagPipeline:
         # Step 2: Hybrid Retrieval
         candidate_indices = self.retriever.retrieve(expanded_query, top_k=20)
 
-        # Step 3: Cross-Encoder Reranking
-        reranked_indices = self.reranker.rerank(text, candidate_indices, self.texts)
+        # Step 3: Cross-Encoder Reranking (batched, returns scores + confidence flag)
+        reranked_indices, reranked_scores, low_confidence = self.reranker.rerank(
+            text, candidate_indices, self.texts
+        )
 
         # Step 4: Top-k selection
         top_indices      = reranked_indices[:top_k]
         retrieved_labels = [self.labels[i] for i in top_indices]
         top_texts        = [self.texts[i]  for i in top_indices]
 
+        if low_confidence:
+            logger.warning(
+                f"Low-confidence retrieval for query: '{text[:80]}' — "
+                "top cross-encoder score below threshold. Results may not be relevant."
+            )
+
         # Step 5: Rationale Generation
         rationale_map = self.generator.generate(text, retrieved_labels, top_texts)
 
         latency = time.time() - start_time
         logger.info(f"Query completed in {latency:.2f}s")
+
+        # Attach confidence metadata for UI/caller to surface warnings
+        rationale_map["__meta__"] = {
+            "low_confidence": low_confidence,
+            "top_score": float(reranked_scores[0]) if reranked_scores else None,
+        }
+
         return retrieved_labels, rationale_map, latency
